@@ -1,0 +1,14 @@
+import {z} from 'zod';
+export const provider = z.enum(['claude','codex']);
+export type Provider = z.infer<typeof provider>;
+export const scriptName = z.enum(['setup','preview','check','test','build']);
+export type Project = {id:number;name:string;installation:number;base:string};
+export type Tree = {id:string;user_id:number;project_id:number;branch:string;base:string;title:string;pr:number|null;state:'open'|'closed';revision:number;created:number};
+export type Session = {id:string;worktree_id:string;provider:Provider;native_id:string|null;created:number};
+export type Turn = {id:string;worktree_id:string;session_id:string;kind:string;input:string;image:string|null;status:'queued'|'running'|'saving'|'failed'|'done'|'cancelled';created:number;ended:number|null;error:string|null;cancel:number};
+export type Activity = {id:number;session_id:string;turn_id:string;kind:'user'|'assistant'|'tool'|'status';body:string;created:number};
+export const busy = (s:string)=>['queued','running','saving'].includes(s);
+export const keySchema = z.string().trim().min(16).max(512).regex(/^[A-Za-z0-9_\.\-]+$/);
+export const promptSchema=z.object({id:z.uuid(),text:z.string().trim().min(1).max(16000),image:z.uuid().optional()});
+export type Overview={simulated:boolean;user:{id:number;login:string};projects:Project[];trees:Tree[];sessions:Session[];active:Pick<Turn,'id'|'session_id'|'status'>[];accounts:Provider[];install:string};
+export type Pull={number:number;title:string;body:string;url:string;head:string;draft:boolean;state:string;mergeable:boolean|null;review:string|null;comments:{id:number;author:string;body:string;url:string}[];files:{name:string;add:number;del:number;patch?:string}[];commits:{sha:string;message:string}[];checks:{name:string;state:string;url:string|null}[];reviews:{author:string;state:string;body:string}[]};

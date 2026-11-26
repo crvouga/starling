@@ -1,0 +1,2 @@
+import {MessageSquareLock} from 'lucide-react';
+export default function ChatUnavailable(){return <div role="status" className="m-auto max-w-xs p-6 text-center"><MessageSquareLock className="mx-auto mb-4 text-muted"/><h2 className="font-semibold">ChatUI needs activation</h2><p className="mt-2 text-sm text-muted">Install the licensed HeroUI Pro package and rebuild to open agent conversations.</p></div>}

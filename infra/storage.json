@@ -1,0 +1,1 @@
+{"rules":[{"id":"Expire prompt uploads","enabled":true,"conditions":{"prefix":"inputs/"},"deleteObjectsTransition":{"condition":{"type":"Age","maxAge":604800}}},{"id":"Discard unfinished uploads","enabled":true,"conditions":{"prefix":""},"abortMultipartUploadsTransition":{"condition":{"type":"Age","maxAge":86400}}}]}
