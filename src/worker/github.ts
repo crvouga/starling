@@ -1,19 +1,21 @@
+import {createPrivateKey} from 'node:crypto';
 import {Octokit} from '@octokit/rest';
 import {createAppAuth} from '@octokit/auth-app';
 import {refreshToken} from '@octokit/oauth-methods';
 import {z} from 'zod';
 import {fail,now,open,seal,type Env,type User} from './core';
 import type {Project,Pull,Tree} from '../shared';
-export function gh(token:string){return new Octokit({auth:token,userAgent:'Starling',log:{debug(){},info(){},warn(){},error(){}}})}
+export function localGithub(env:Env){return env.LOCAL_GITHUB && /^http:\/\/[a-z0-9.-]*localhost:\d+$/.test(env.ORIGIN) && /^http:\/\/127\.0\.0\.1:\d+$/.test(env.LOCAL_GITHUB)?env.LOCAL_GITHUB:undefined}
+export function gh(token:string,env?:Env){return new Octokit({...(env&&localGithub(env)?{baseUrl:localGithub(env)}:{}),auth:token,userAgent:'Starling',log:{debug(){},info(){},warn(){},error(){}}})}
 const access=z.object({token:z.string(),refresh:z.string().optional()});
 export async function client(env:Env,user:User){
   const stored=access.parse(JSON.parse(await open(env,'github:'+user.id,user.credential)));
-  if(user.expires>now()+90)return gh(stored.token);
+  if(user.expires>now()+90)return gh(stored.token,env);
   if(!stored.refresh)fail(401,'Sign in again to refresh GitHub access.');
   const {authentication:a}=await refreshToken({clientType:'github-app',clientId:env.GH_CLIENT_ID,clientSecret:env.GH_CLIENT_SECRET,refreshToken:stored.refresh});
   const box=await seal(env,'github:'+user.id,JSON.stringify({token:a.token,refresh:a.refreshToken}));
   await env.DB.prepare('UPDATE users SET credential=?,expires=? WHERE id=? AND credential=?').bind(box,Math.floor(Date.parse(a.expiresAt)/1000),user.id,user.credential).run();
-  return gh(a.token)
+  return gh(a.token,env)
 }
 export function split(name:string){const [owner,repo]=name.split('/');return {owner,repo}}
 export async function projects(api:Octokit):Promise<Project[]>{
@@ -35,7 +37,7 @@ export async function authorized(api:Octokit,p:Project,write=false){
   if(!allowed.some(r=>r.id===p.id))fail(403,'The GitHub App no longer has access to this repository.')
 }
 export async function tokenFor(env:Env,p:Project,write=false){
-  const auth=createAppAuth({appId:env.GH_APP_ID,privateKey:env.GH_PRIVATE_KEY.replaceAll('\\n','\n'),clientId:env.GH_CLIENT_ID,clientSecret:env.GH_CLIENT_SECRET});
+  const auth=createAppAuth({request:new Octokit({baseUrl:localGithub(env)}).request,appId:env.GH_APP_ID,privateKey:createPrivateKey(env.GH_PRIVATE_KEY.replaceAll('\\n','\n')).export({format:'pem',type:'pkcs8'}).toString(),clientId:env.GH_CLIENT_ID,clientSecret:env.GH_CLIENT_SECRET});
   const a=await auth({type:'installation',installationId:p.installation,repositoryIds:[p.id],permissions:{contents:write?'write':'read',pull_requests:write?'write':'read',issues:write?'write':'read'}});return a.token
 }
 export async function branchAndPull(api:Octokit,p:Project,t:Tree){

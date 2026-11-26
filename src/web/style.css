@@ -1,0 +1,9 @@
+@import 'tailwindcss';
+@import '@heroui/styles';
+@import '@fontsource-variable/inter/index.css';
+@import '@fontsource-variable/jetbrains-mono/index.css';
+:root {font-family:'Inter Variable',sans-serif} body{margin:0} button,a,input,textarea{touch-action:manipulation} code,pre,.mono{font-family:'JetBrains Mono Variable',monospace}
+.workspace {display:grid;grid-template-columns: minmax(14rem,19%) minmax(16rem,1fr) minmax(20rem,32%);height:100dvh}
+.login-photo{background:linear-gradient(180deg,transparent 58%,rgb(0 0 0 / .45)),url('/studland.jpg') center / cover}
+@media(max-width:1000px){.workspace{grid-template-columns:15rem minmax(0,1fr)}.workspace [data-pane=review]{display:none}.workspace[data-mobile=review] [data-pane=review]{display:flex}.workspace[data-mobile=review] [data-pane=chat]{display:none}}
+@media(max-width:700px){.workspace{display:flex}.workspace [data-pane]{display:none;width:100%}.workspace[data-mobile=nav] [data-pane=nav],.workspace[data-mobile=chat] [data-pane=chat],.workspace[data-mobile=review] [data-pane=review]{display:flex}}

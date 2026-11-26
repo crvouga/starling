@@ -5,12 +5,12 @@ import {bodyLimit} from 'hono/body-limit';
 import {verify} from '@octokit/webhooks-methods';
 import {z} from 'zod';
 import {auth,identify,type App} from './auth';
-import {client,gh,projects,split,pull,tokenFor} from './github';
+import {authorized,client,gh,localGithub,projects,split,pull,tokenFor} from './github';
 import {connected,context,dispatchFeedback,turnStatements} from './state';
 import {digest,fail,now,rows,seal,type Env,type User} from './core';
 import {keySchema,provider,promptSchema,scriptName,type Activity,type Project,type Session,type Tree,type Turn} from '../shared';
 export {Workspace,DirectoryBackupGateway} from './sandbox';
-export {Outbound,ProviderProxy} from './outbound';
+export {Outbound,ProviderProxy,FixtureModel} from './outbound';
 const app=new Hono<App>(),api=new Hono<App>();
 app.use('*',async(c,next)=>{await next();c.header('X-Content-Type-Options','nosniff');c.header('Referrer-Policy','no-referrer');c.header('Cache-Control','no-store')});
 app.route('/auth',auth);
@@ -22,7 +22,7 @@ api.get('/overview',async c=>{
  const trees=(await rows<Tree>(db,'SELECT * FROM worktrees WHERE user_id=? ORDER BY created DESC LIMIT 100',u.id)).filter(t=>allowed.has(t.project_id));
  const ids=new Set(trees.map(t=>t.id));const sessions=(await rows<Session>(db,'SELECT s.* FROM sessions s JOIN worktrees w ON w.id=s.worktree_id WHERE w.user_id=? ORDER BY s.created',u.id)).filter(s=>ids.has(s.worktree_id));
  const active=(await rows<Pick<Turn,'id'|'session_id'|'status'|'worktree_id'>>(db,"SELECT r.id,r.session_id,r.worktree_id,r.status FROM turns r JOIN worktrees w ON w.id=r.worktree_id WHERE w.user_id=? AND r.status IN ('queued','running','saving')",u.id)).filter(r=>ids.has(r.worktree_id));
- return c.json({user:{id:u.id,login:u.login},projects:ps,trees,sessions,active,accounts:(await rows<{provider:string}>(db,'SELECT provider FROM accounts WHERE user_id=?',u.id)).map(a=>a.provider),install:'https://github.com/apps/'+encodeURIComponent(c.env.GH_SLUG)+'/installations/new'})
+ return c.json({user:{id:u.id,login:u.login},projects:ps,trees,sessions,active,accounts:(await rows<{provider:string}>(db,'SELECT provider FROM accounts WHERE user_id=?',u.id)).map(a=>a.provider),simulated:!!localGithub(c.env),install:'https://github.com/apps/'+encodeURIComponent(c.env.GH_SLUG)+'/installations/new'})
 });
 api.post('/logout',async c=>{await c.env.DB.prepare('DELETE FROM logins WHERE id=?').bind(await digest(getCookie(c,'__Host-starling')!)).run();deleteCookie(c,'__Host-starling',{secure:true,path:'/'});return c.json({ok:true})});
 api.put('/accounts/:p',async c=>{const p=provider.parse(c.req.param('p')),u=c.get('user'),{key}=z.object({key:keySchema}).parse(await c.req.json());
@@ -34,8 +34,8 @@ api.put('/accounts/:p',async c=>{const p=provider.parse(c.req.param('p')),u=c.ge
 });
 api.delete('/accounts/:p',async c=>{const p=provider.parse(c.req.param('p')),id=c.get('user').id;await c.env.DB.prepare('DELETE FROM accounts WHERE user_id=? AND provider=?').bind(id,p).run();await c.env.PROXIES.getByName(id+'-'+p).reset();return c.json({ok:true})});
 api.post('/worktrees',async c=>{const b=promptSchema.extend({project:z.number().int(),provider}).parse(await c.req.json()),env=c.env,u=c.get('user');
- const prev=await env.DB.prepare('SELECT id,project_id FROM worktrees WHERE id=? AND user_id=?').bind(b.id,u.id).first<{id:string;project_id:number}>();if(prev){await context(env,u,prev.id);return c.json({id:prev.id})}
- const p=(await projects(await client(env,u))).find(p=>p.id===b.project);if(!p)fail(403,'Repository unavailable.');await connected(env,u.id,b.provider);
+ const prev=await env.DB.prepare('SELECT id,project_id FROM worktrees WHERE id=? AND user_id=?').bind(b.id,u.id).first<{id:string;project_id:number}>();if(prev){await context(env,u,prev.id);return c.json({id:prev.id,session:await env.DB.prepare('SELECT id FROM sessions WHERE worktree_id=? ORDER BY created,rowid LIMIT 1').bind(prev.id).first('id')})}
+ const userApi=await client(env,u),p=(await projects(userApi)).find(p=>p.id===b.project);if(!p)fail(403,'Repository unavailable.');await authorized(userApi,p,true);await connected(env,u.id,b.provider);
  const session=crypto.randomUUID(),title=b.text.split('\n')[0].slice(0,96),branch='starling/'+title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,32)+'-'+b.id.slice(0,8);
  await env.DB.batch([env.DB.prepare('INSERT INTO projects VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,installation=excluded.installation,base=excluded.base').bind(p.id,p.name,p.installation,p.base),env.DB.prepare('INSERT INTO worktrees(id,user_id,project_id,branch,base,title,created) VALUES(?,?,?,?,?,?,?)').bind(b.id,u.id,p.id,branch,p.base,title,now()),env.DB.prepare('INSERT INTO sessions VALUES(?,?,?,NULL,?)').bind(session,b.id,b.provider,now()),...turnStatements(env,b.id,session,b.id,'prompt',b.text,b.image)]);
  await env.WORKTREES.getByName(b.id).wake(b.id);return c.json({id:b.id,session},201)
@@ -80,7 +80,7 @@ app.post('/webhooks/github',bodyLimit({maxSize:1024*1024}),async c=>{
 });
 async function reconcileClosed(env:Env,t:Tree){
  if(!t.pr)return;
- const p=(await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>())!,api=gh(await tokenFor(env,p,true)),repo=split(p.name);
+ const p=(await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>())!,api=gh(await tokenFor(env,p,true),env),repo=split(p.name);
  const {data:r}=await api.rest.pulls.get({...repo,pull_number:t.pr});if(r.state!=='closed')return;
  await env.DB.prepare("UPDATE worktrees SET state='closed',revision=revision+1 WHERE id=? AND state='open'").bind(t.id).run();
  if(!r.merged)return; // Closed unmerged branches keep their checkpoint.

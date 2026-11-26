@@ -2,7 +2,7 @@ import {DurableObject,WorkerEntrypoint} from 'cloudflare:workers';
 import {safePush} from './native';
 import {open,random,type Env} from './core';
 import type {Project,Provider,Tree} from '../shared';
-import {tokenFor} from './github';
+import {tokenFor,localGithub} from './github';
 type Grant={tree:string;turn:string;provider:Provider};
 const deny=()=>new Response('Access denied',{status:403});
 export class Outbound extends WorkerEntrypoint<Env,Grant>{
@@ -13,7 +13,10 @@ export class Outbound extends WorkerEntrypoint<Env,Grant>{
   if(url.hostname==='model.starling.internal'){
     const path=g.provider==='claude'?'/v1/messages':'/v1/responses';
     if(request.method!=='POST'||url.pathname!==path)return deny();
-    return this.env.PROXIES.getByName(t.user_id+'-'+g.provider).forward(t.user_id,g.provider,new Request('http://proxy'+path,{method:'POST',body:request.body,headers:{'content-type':'application/json','anthropic-version':'2023-06-01'}}))
+    const quota=await this.env.DB.prepare("UPDATE turns SET model_requests=model_requests+1 WHERE id=? AND status='running' AND cancel=0 AND model_requests<64").bind(g.turn).run();
+    if(!quota.meta.changes)return new Response('Model request limit reached',{status:429});
+    const payload=await limited(request,2*1024*1024);if(!payload)return new Response('Model request too large',{status:413});
+    return this.env.PROXIES.getByName(t.user_id+'-'+g.provider).forward(t.user_id,g.provider,new Request('http://proxy'+path,{method:'POST',body:payload.buffer as ArrayBuffer,headers:{'content-type':'application/json','anthropic-version':'2023-06-01'}}))
   }
   if(url.hostname==='registry.npmjs.org' && ['GET','HEAD'].includes(request.method))return fetch(url,{method:request.method,redirect:'manual'});
   const p=await this.env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>();
@@ -29,10 +32,13 @@ export class Outbound extends WorkerEntrypoint<Env,Grant>{
   if(push){const packet=await limited(request,16*1024*1024);if(!packet||!safePush(packet,t.branch))return deny();body=packet.buffer as ArrayBuffer}
   const token=await tokenFor(this.env,p,!read),headers=new Headers({authorization:'Basic '+btoa('x-access-token:'+token),'user-agent':'Starling'});
   if(request.method==='POST')headers.set('content-type','application/x-'+path+'-request');
-  return fetch(url,{method:request.method,headers,body,redirect:'manual'})
+  return fetch(localGithub(this.env)?localGithub(this.env)+url.pathname+url.search:url,{method:request.method,headers,body,redirect:'manual'})
  }
 }
 export async function limited(request:Request,limit:number){const reader=request.body?.getReader();if(!reader)return null;const chunks:Uint8Array[]=[];let length=0;while(true){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>limit){await reader.cancel();return null}chunks.push(value)}const out=new Uint8Array(length);let offset=0;for(const chunk of chunks){out.set(chunk,offset);offset+=chunk.length}return out}
+export class FixtureModel extends WorkerEntrypoint<Env>{
+ async fetch(request:Request){const local=localGithub(this.env),path=new URL(request.url).pathname;if(!local||request.method!=='POST'||path!=='/v1/chat/completions')return deny();return fetch(local+path,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer fixture-openai-token'},body:request.body})}
+}
 export class ProviderProxy extends DurableObject<Env>{
  private config?:Promise<string>;private credential?:string;
  async reset(){this.config=undefined;this.credential=undefined;if(this.ctx.container?.running)await this.ctx.container.destroy()}
@@ -51,8 +57,11 @@ export class ProviderProxy extends DurableObject<Env>{
  }
  private async start(c:Container,user:number,provider:Provider,box:string){
   const upstream=await open(this.env,user+':'+provider,box),key=random();
-  const config={'config-version':8,server:{host:'0.0.0.0',port:8317,'kv-store':{disabled:true}},management:{'disable-control-panel':true},access:{'api-keys':[key]},oauth:{'auth-dir':'/tmp/auth'},'api-keys':{[provider]:[{name:'owner',...(provider==='codex'?{'base-url':'https://api.openai.com/v1'}:{}),keys:[{'api-key':upstream}]}]}};
-  if(!c.running)c.start({image:c.images.proxy,instance:'lite',enableInternet:true});
+  const config:Record<string,unknown>={'config-version':8,server:{host:'0.0.0.0',port:8317,'kv-store':{disabled:true}},management:{'disable-control-panel':true},access:{'api-keys':[key]},oauth:{'auth-dir':'/tmp/auth'},'api-keys':{[provider]:[{name:'owner',...(provider==='codex'?{'base-url':'https://api.openai.com/v1'}:{}),keys:[{'api-key':upstream}]}]}};
+  const fixture=!!localGithub(this.env)&&upstream==='fixture-openai-token';
+  if(fixture){config['api-keys']={'openai-compatibility':[{name:'Mockingbird','base-url':'http://fixture.starling.internal/v1',keys:[{'api-key':upstream}],models:[{name:'fixture-chat',alias:'gpt-5.4'},{name:'fixture-chat',alias:'claude-sonnet-4-6'}]}]}}
+  if(!c.running)c.start({image:c.images.proxy,instance:'lite',enableInternet:!fixture});
+  if(fixture)await c.interceptOutboundHttp('fixture.starling.internal',this.ctx.exports.FixtureModel);
   await c.setInactivityTimeout(90000);
   const proc=await c.exec(['sh','-c','umask 077; cat > /tmp/config.yaml && exec /usr/local/bin/proxy -config /tmp/config.yaml -local-model'],{stdin:new Response(JSON.stringify(config)).body!,stdout:'ignore',stderr:'ignore'});
   for(let i=0;i<35;i++){try{const r=await c.getTcpPort(8317).fetch('http://proxy/v1/models',{headers:{authorization:'Bearer '+key}});if(r.ok)return key}catch{}await new Promise(resolve=>setTimeout(resolve,200))}

@@ -46,14 +46,15 @@ export class Workspace extends DurableObject<Env>{
    await env.DB.prepare("UPDATE turns SET status='running' WHERE id=? AND status='queued'").bind(turn.id).run();
    const user=(await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(t.user_id).first<User>())!,userApi=await client(env,user);
    await authorized(userApi,p,true);
-   const api=gh(await tokenFor(env,p,true)),repo=split(p.name);
+   const api=gh(await tokenFor(env,p,true),env),repo=split(p.name);
    if(!t.pr){t.pr=await branchAndPull(api,p,t);await env.DB.prepare('UPDATE worktrees SET pr=?,revision=revision+1 WHERE id=?').bind(t.pr,t.id).run();this.notify('pr')}
    const {data:pr}=await api.rest.pulls.get({...repo,pull_number:t.pr});
    if(pr.state!=='open'||pr.head.ref!==t.branch||pr.head.repo?.id!==p.id)throw new Error('The pull request is closed or its head changed.');
    const gate=this.ctx.exports.Outbound({props:{tree:t.id,turn:turn.id,provider:s.provider}}) as Fetcher<Outbound>;
-   for(const host of ['github.com','registry.npmjs.org','model.starling.internal'])await c.interceptOutboundHttps(host,gate);
    const cold=!c.running;
    if(cold)c.start({image:c.images.agent,instance:'standard-1',enableInternet:false});
+   await event('status',cold?'Starting isolated sandbox':'Preparing existing sandbox');
+   for(const host of ['github.com','registry.npmjs.org','model.starling.internal'])await c.interceptOutboundHttps(host,gate);
    await c.setInactivityTimeout(25*60000);
    this.signal=new AbortController();
    const signal=AbortSignal.any([AbortSignal.timeout(15*60000),this.signal.signal]);
@@ -69,11 +70,12 @@ export class Workspace extends DurableObject<Env>{
     if(code!==0)throw new Error(scrub(tail).slice(-1300)||'Command exited '+code);
     return tail.trim()
    };
-   if(cold&&old){await event('status','Restoring worktree and native sessions');await backup.restore(old)}
+   if(cold&&old){await event('status','Restoring worktree and native sessions');await files.remove('/workspace',{recursive:true,force:true});await backup.restore(old)}
    if(!old && !(await exists(files,repoDir+'/.git'))){
     await event('status','Cloning '+p.name);await command(['git','clone','--single-branch','--branch',t.branch,'--','https://github.com/'+p.name+'.git',repoDir],'/workspace');
    }
    checkpoint=true;
+   await command(['mkdir','-p',runtimeEnv.CODEX_HOME,runtimeEnv.CLAUDE_CONFIG_DIR]);
    if(!old){await event('status','Running repository setup');const output=await command(['node','/usr/local/lib/starling-script.mjs','setup','--if-present']);if(output)await event('tool',output)}
    const branch=await command(['git','symbolic-ref','--short','HEAD']);if(branch!==t.branch)throw new Error('Unexpected checkout branch. Workspace preserved for recovery.');
    await command(['git','fetch','origin',t.branch]);await command(['git','merge','--ff-only','FETCH_HEAD']);

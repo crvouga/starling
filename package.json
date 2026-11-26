@@ -15,7 +15,10 @@
     "build": "vite build",
     "worker": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "Localhost": "node scripts/localhost.mjs",
+    "schema": "node scripts/schema.mjs",
+    "github:register": "node scripts/register-github.mjs"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",
@@ -36,6 +39,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261125.1",
     "@crvouga/mockingbird-service-github": "1.20.0",
+    "@crvouga/mockingbird-service-openai": "1.20.0",
     "@playwright/test": "1.65.1",
     "@tailwindcss/vite": "4.3.5",
     "@types/node": "26.6.11",

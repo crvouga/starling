@@ -10,5 +10,5 @@ export type Activity = {id:number;session_id:string;turn_id:string;kind:'user'|'
 export const busy = (s:string)=>['queued','running','saving'].includes(s);
 export const keySchema = z.string().trim().min(16).max(512).regex(/^[A-Za-z0-9_\.\-]+$/);
 export const promptSchema=z.object({id:z.uuid(),text:z.string().trim().min(1).max(16000),image:z.uuid().optional()});
-export type Overview={user:{id:number;login:string};projects:Project[];trees:Tree[];sessions:Session[];active:Pick<Turn,'id'|'session_id'|'status'>[];accounts:Provider[];install:string};
+export type Overview={simulated:boolean;user:{id:number;login:string};projects:Project[];trees:Tree[];sessions:Session[];active:Pick<Turn,'id'|'session_id'|'status'>[];accounts:Provider[];install:string};
 export type Pull={number:number;title:string;body:string;url:string;head:string;draft:boolean;state:string;mergeable:boolean|null;review:string|null;comments:{id:number;author:string;body:string;url:string}[];files:{name:string;add:number;del:number;patch?:string}[];commits:{sha:string;message:string}[];checks:{name:string;state:string;url:string|null}[];reviews:{author:string;state:string;body:string}[]};
