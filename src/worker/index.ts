@@ -6,6 +6,7 @@ import {verify} from '@octokit/webhooks-methods';
 import {z} from 'zod';
 import {auth,identify,type App} from './auth';
 import {authorized,client,gh,localGithub,projects,split,pull,tokenFor} from './github';
+import {recordNotes,reconcileTree} from './feedback';
 import {connected,context,dispatchFeedback,turnStatements} from './state';
 import {digest,fail,now,rows,seal,type Env,type User} from './core';
 import {keySchema,provider,promptSchema,scriptName,type Activity,type Project,type Session,type Tree,type Turn} from '../shared';
@@ -14,13 +15,16 @@ export {Outbound,ProviderProxy,FixtureModel} from './outbound';
 const app=new Hono<App>(),api=new Hono<App>();
 app.use('*',async(c,next)=>{await next();c.header('X-Content-Type-Options','nosniff');c.header('Referrer-Policy','no-referrer');c.header('Cache-Control','no-store')});
 app.route('/auth',auth);
-app.get('/api/health',c=>c.json({service:'starling',githubConfigured:!!(c.env.GH_CLIENT_ID&&c.env.GH_PRIVATE_KEY&&c.env.GH_WEBHOOK_SECRET)}));
-api.use('*',async(c,next)=>{if(!['GET','HEAD'].includes(c.req.method)&&c.req.header('origin')!==c.env.ORIGIN)fail(403,'Same-origin request required.');c.set('user',await identify(c.env,getCookie(c,'__Host-starling')));await next()});
+app.get('/api/health',c=>c.json({service:'starling',instance:c.env.LOCAL_INSTANCE,githubConfigured:!!(c.env.GH_CLIENT_ID&&c.env.GH_PRIVATE_KEY&&c.env.GH_WEBHOOK_SECRET)}));
+api.use('*',async(c,next)=>{if(!['GET','HEAD'].includes(c.req.method)&&c.req.header('origin')!==c.env.ORIGIN)fail(403,'Same-origin request required.');try{c.set('user',await identify(c.env,getCookie(c,'__Host-starling')))}catch(e){
+ if(e instanceof HTTPException&&e.status===401&&c.req.header('sec-fetch-mode')==='navigate'&&c.req.path.startsWith('/api/evidence/'))return c.redirect('/auth/github?next='+encodeURIComponent(c.req.path));
+ throw e
+ }await next()});
 api.use('*',bodyLimit({maxSize:2*1024*1024,onError:()=>fail(413,'Request is too large.')}));
 api.get('/overview',async c=>{
  const u=c.get('user'),db=c.env.DB,ps=await projects(await client(c.env,u)),allowed=new Set(ps.map(p=>p.id));
  const trees=(await rows<Tree>(db,'SELECT * FROM worktrees WHERE user_id=? ORDER BY created DESC LIMIT 100',u.id)).filter(t=>allowed.has(t.project_id));
- const ids=new Set(trees.map(t=>t.id));const sessions=(await rows<Session>(db,'SELECT s.* FROM sessions s JOIN worktrees w ON w.id=s.worktree_id WHERE w.user_id=? ORDER BY s.created',u.id)).filter(s=>ids.has(s.worktree_id));
+ const ids=new Set(trees.map(t=>t.id));const sessions=(await rows<Session>(db,'SELECT s.*,(SELECT max(id) FROM events e WHERE e.session_id=s.id) AS latest FROM sessions s JOIN worktrees w ON w.id=s.worktree_id WHERE w.user_id=? ORDER BY s.created',u.id)).filter(s=>ids.has(s.worktree_id));
  const active=(await rows<Pick<Turn,'id'|'session_id'|'status'|'worktree_id'>>(db,"SELECT r.id,r.session_id,r.worktree_id,r.status FROM turns r JOIN worktrees w ON w.id=r.worktree_id WHERE w.user_id=? AND r.status IN ('queued','running','saving')",u.id)).filter(r=>ids.has(r.worktree_id));
  return c.json({user:{id:u.id,login:u.login},projects:ps,trees,sessions,active,accounts:(await rows<{provider:string}>(db,'SELECT provider FROM accounts WHERE user_id=?',u.id)).map(a=>a.provider),simulated:!!localGithub(c.env),install:'https://github.com/apps/'+encodeURIComponent(c.env.GH_SLUG)+'/installations/new'})
 });
@@ -49,15 +53,16 @@ api.post('/worktrees/:id/pr',async c=>{const {t,p,api}=await context(c.env,c.get
  await c.env.WORKTREES.getByName(t.id).notify('pr');return c.json({ok:true})
 });
 api.get('/worktrees/:id/sessions/:s',async c=>{const {t}=await context(c.env,c.get('user'),c.req.param('id'));const s=await ownedSession(c.env,t,c.req.param('s'));const after=z.coerce.number().int().min(0).parse(c.req.query('after')??0);
- return c.json({events:await rows<Activity>(c.env.DB,'SELECT * FROM events WHERE session_id=? AND id>? ORDER BY id LIMIT 100',s.id,after),turn:await c.env.DB.prepare('SELECT id,status,error FROM turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1').bind(s.id).first()})
+ return c.json({approval:await c.env.WORKTREES.getByName(t.id).permission(),events:await rows<Activity>(c.env.DB,'SELECT * FROM events WHERE session_id=? AND id>? ORDER BY id LIMIT 100',s.id,after),turn:await c.env.DB.prepare('SELECT id,status,error FROM turns WHERE session_id=? ORDER BY created DESC,rowid DESC LIMIT 1').bind(s.id).first()})
 });
 api.post('/worktrees/:id/sessions/:s',async c=>{const {t}=await context(c.env,c.get('user'),c.req.param('id'),true),s=await ownedSession(c.env,t,c.req.param('s')),b=promptSchema.extend({script:scriptName.optional()}).parse(await c.req.json());
  if(!b.script)await connected(c.env,t.user_id,s.provider);
  if(!await c.env.DB.prepare('SELECT id FROM turns WHERE id=? AND session_id=?').bind(b.id,s.id).first())await c.env.DB.batch(turnStatements(c.env,t.id,s.id,b.id,b.script??'prompt',b.script?'Run '+b.script:b.text,b.image));
  await c.env.WORKTREES.getByName(t.id).wake(t.id);return c.json({ok:true},202)
 });
+api.post('/worktrees/:id/approval',async c=>{const {t}=await context(c.env,c.get('user'),c.req.param('id'),true);const b=z.object({turn:z.string().max(160),id:z.string().max(180),allow:z.boolean()}).parse(await c.req.json());if(!await c.env.WORKTREES.getByName(t.id).approve(b.turn,b.id,b.allow))fail(409,'Approval has expired.');return c.json({ok:true})});
 api.post('/worktrees/:id/cancel',async c=>{const {t}=await context(c.env,c.get('user'),c.req.param('id'),true),{id}=z.object({id:z.string().max(120)}).parse(await c.req.json());
- const r=await c.env.DB.prepare("UPDATE turns SET cancel=1 WHERE worktree_id=? AND id=? AND status IN ('queued','running')").bind(t.id,id).run();if(r.meta.changes)await c.env.WORKTREES.getByName(t.id).cancel();return c.json({ok:true})});
+ const r=await c.env.DB.prepare("UPDATE turns SET cancel=1 WHERE worktree_id=? AND id=? AND status IN ('queued','running')").bind(t.id,id).run();if(r.meta.changes)await c.env.WORKTREES.getByName(t.id).cancel(id);return c.json({ok:true})});
 api.post('/images',async c=>{const data=new Uint8Array(await c.req.arrayBuffer()),png=[137,80,78,71,13,10,26,10].every((n,i)=>data[i]===n),jpeg=data[0]===255&&data[1]===216&&data[2]===255;
  if(!png&&!jpeg)fail(400,'Choose a PNG or JPEG image.');const id=crypto.randomUUID();await c.env.PRIVATE.put('inputs/'+c.get('user').id+'/'+id,data,{httpMetadata:{contentType:png?'image/png':'image/jpeg'}});return c.json({id})});
 api.get('/evidence/:tree/:turn/:name',async c=>{const {t}=await context(c.env,c.get('user'),c.req.param('tree'),false,true);const obj=await c.env.PRIVATE.get('evidence/'+t.id+'/'+c.req.param('turn')+'/'+c.req.param('name'));if(!obj)fail(404,'Evidence not found.');return new Response(obj.body,{headers:{'content-type':obj.httpMetadata?.contentType??'application/octet-stream','content-security-policy':"default-src 'none'; sandbox",'cache-control':'private, no-store'}})});
@@ -67,30 +72,29 @@ app.post('/webhooks/github',bodyLimit({maxSize:1024*1024}),async c=>{
  const body=await c.req.text(),env=c.env,sig=c.req.header('x-hub-signature-256'),id=c.req.header('x-github-delivery');
  if(!env.GH_WEBHOOK_SECRET||!sig||!id||!await verify(env.GH_WEBHOOK_SECRET,body,sig))fail(403,'Invalid signature.');
  if(await env.DB.prepare('SELECT 1 FROM deliveries WHERE id=?').bind(id).first())return c.json({ok:true});
- const b=z.object({action:z.string().optional(),repository:z.object({id:z.number()}).optional(),sender:z.object({id:z.number(),type:z.string()}).optional(),issue:z.object({number:z.number()}).optional(),pull_request:z.object({number:z.number()}).optional(),comment:z.object({body:z.string(),id:z.number()}).optional(),review:z.object({body:z.string().nullable(),id:z.number()}).optional(),check_run:z.object({pull_requests:z.array(z.object({number:z.number()})),conclusion:z.string().nullable(),head_sha:z.string()}).optional(),ref:z.string().optional()}).parse(JSON.parse(body));
- const event=c.req.header('x-github-event'),number=b.pull_request?.number??b.issue?.number??b.check_run?.pull_requests[0]?.number;
- const t=await env.DB.prepare('SELECT * FROM worktrees WHERE project_id=? AND (pr=? OR branch=?)').bind(b.repository?.id??0,number??-1,b.ref?.replace(/^refs\/heads\//,'')??'').first<Tree>();
- const actions:D1PreparedStatement[]=[];
- if(t){const message=b.comment??b.review;
-  if(message?.body&&b.sender?.id===t.user_id&&b.sender.type==='User'&&['created','submitted'].includes(b.action??'')&&!message.body.includes('<!-- starling:'))actions.push(env.DB.prepare('INSERT OR IGNORE INTO feedback VALUES(?,?,?,?)').bind(event+'-'+message.id,t.id,'GitHub feedback:\n'+message.body.slice(0,12000),now()));
-  if(event==='pull_request'&&b.action==='closed')await reconcileClosed(env,t);
-  actions.push(env.DB.prepare('UPDATE worktrees SET revision=revision+1 WHERE id=?').bind(t.id))
+ const actor=z.object({id:z.number(),login:z.string().optional(),type:z.string()}),note=z.object({id:z.number(),body:z.string().nullable(),user:actor.nullish()});
+ const prRef=z.object({number:z.number()});
+ const b=z.object({action:z.string().optional(),repository:z.object({id:z.number()}).optional(),sender:actor.optional(),issue:prRef.optional(),pull_request:prRef.optional(),comment:note.optional(),review:note.optional(),check_run:z.object({pull_requests:z.array(prRef)}).optional(),check_suite:z.object({pull_requests:z.array(prRef)}).optional(),branches:z.array(z.object({name:z.string()})).optional(),ref:z.string().optional()}).parse(JSON.parse(body));
+ const event=c.req.header('x-github-event'),number=b.pull_request?.number??b.issue?.number??b.check_run?.pull_requests[0]?.number??b.check_suite?.pull_requests[0]?.number;
+ const branch=b.ref?.replace(/^refs\/heads\//,'')??b.branches?.find(v=>v.name.startsWith('starling/'))?.name;
+ const t=await env.DB.prepare('SELECT * FROM worktrees WHERE project_id=? AND (pr=? OR branch=?)').bind(b.repository?.id??0,number??-1,branch??'').first<Tree>();
+ if(t){
+  if(t.state==='open'&&(event==='issue_comment'||event==='pull_request_review_comment'||event==='pull_request_review')&&['created','submitted'].includes(b.action??'')){
+   const message=b.comment??b.review;
+   if(message?.user?.id===b.sender?.id&&message?.user){
+    const p=(await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>())!;
+    await recordNotes(env,t,p,gh(await tokenFor(env,p),env),[{source:event,note:message}])
+   }
+  }
+  if(event==='pull_request'&&['closed','reopened'].includes(b.action??''))await reconcileTree(env,t);
+  if(t.state==='open'&&['check_run','check_suite','status'].includes(event??''))await reconcileTree(env,t,true);
+  await dispatchFeedback(env,t);
+  await env.DB.prepare('UPDATE worktrees SET revision=revision+1 WHERE id=?').bind(t.id).run();
+  await env.WORKTREES.getByName(t.id).notify('pr')
  }
- actions.push(env.DB.prepare('INSERT OR IGNORE INTO deliveries VALUES (?,?)').bind(id,now()));await env.DB.batch(actions);if(t){await env.WORKTREES.getByName(t.id).notify('pr');await dispatchFeedback(env,t)}return c.json({ok:true})
+ await env.DB.prepare('INSERT OR IGNORE INTO deliveries VALUES (?,?)').bind(id,now()).run();
+ return c.json({ok:true})
 });
-async function reconcileClosed(env:Env,t:Tree){
- if(!t.pr)return;
- const p=(await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>())!,api=gh(await tokenFor(env,p,true),env),repo=split(p.name);
- const {data:r}=await api.rest.pulls.get({...repo,pull_number:t.pr});if(r.state!=='closed')return;
- await env.DB.prepare("UPDATE worktrees SET state='closed',revision=revision+1 WHERE id=? AND state='open'").bind(t.id).run();
- if(!r.merged)return; // Closed unmerged branches keep their checkpoint.
- if(await env.DB.prepare("SELECT 1 FROM turns WHERE worktree_id=? AND status IN ('running','queued','saving')").bind(t.id).first())return;
- if((await env.DB.prepare("SELECT status FROM turns WHERE worktree_id=? ORDER BY created DESC,rowid DESC LIMIT 1").bind(t.id).first<{status:string}>())?.status!=='done')return;
- if(r.head.ref===t.branch&&r.head.repo?.id===p.id&&t.branch.startsWith('starling/')&&p.base!==t.branch){
-  try{const {data:ref}=await api.rest.git.getRef({...repo,ref:'heads/'+t.branch});if(ref.object.sha!==r.head.sha)return;await api.rest.git.deleteRef({...repo,ref:'heads/'+t.branch})}catch(e){if(![404,422].includes((e as {status:number}).status))throw e}
-  await env.WORKTREES.getByName(t.id).cleanup()
- }
-}
 app.onError((err,c)=>{if(err instanceof HTTPException)return c.json({error:err.message},err.status);if(err instanceof z.ZodError||err instanceof SyntaxError)return c.json({error:'Invalid request.'},400);
  const status=(err as {status?:number}).status;if(status&&[401,403,404,409,422,429].includes(status))return c.json({error:'GitHub declined the request ('+status+').'},status as 403);
  if(/quota|one_writer|UNIQUE constraint failed: turns.worktree_id/.test(String(err)))return c.json({error:'A worktree is busy or its execution quota was reached.'},409);
@@ -100,4 +104,13 @@ export default {fetch:app.fetch,async scheduled(_controller:ScheduledController,
  await env.DB.batch(['DELETE FROM logins WHERE expires<unixepoch()','DELETE FROM oauth_states WHERE expires<unixepoch()','DELETE FROM deliveries WHERE received<unixepoch()-604800'].map(sql=>env.DB.prepare(sql)));
  for(const r of await rows<{worktree_id:string}>(env.DB,"SELECT worktree_id FROM turns WHERE status IN ('queued','running','saving')"))await env.WORKTREES.getByName(r.worktree_id).wake(r.worktree_id);
  for(const t of await rows<Tree>(env.DB,"SELECT DISTINCT w.* FROM worktrees w JOIN feedback f ON f.worktree_id=w.id WHERE state='open' LIMIT 8"))await dispatchFeedback(env,t);
+ // Scan a bounded, oldest-first set even when no webhook arrived.
+ for(const t of await rows<Tree>(env.DB,"SELECT * FROM worktrees WHERE pr IS NOT NULL AND reconciled>=0 AND next_sync<=unixepoch() ORDER BY next_sync,id LIMIT 2")){
+  const started=now();
+  await env.DB.prepare('UPDATE worktrees SET next_sync=? WHERE id=?').bind(started+(t.state==='open'?900:86400),t.id).run();
+  try{await reconcileTree(env,t,true);
+   await env.DB.prepare('UPDATE worktrees SET reconciled=? WHERE id=? AND reconciled>=0').bind(started,t.id).run();
+   await env.WORKTREES.getByName(t.id).notify('pr')
+  }catch(e){console.warn(JSON.stringify({event:'pr_reconciliation_failed',worktree:t.id,status:(e as {status?:number}).status}))}
+ }
 }} satisfies ExportedHandler<Env>;

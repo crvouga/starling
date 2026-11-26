@@ -1,7 +1,7 @@
 import type {Workspace} from './sandbox';
 import type {ProviderProxy} from './outbound';
 import {HTTPException} from 'hono/http-exception';
-export interface Env {LOCAL_GITHUB?:string;DB:D1Database;PRIVATE:R2Bucket;ASSETS:Fetcher;WORKTREES:DurableObjectNamespace<Workspace>;PROXIES:DurableObjectNamespace<ProviderProxy>;ORIGIN:string;KEY:string;GH_APP_ID:string;GH_SLUG:string;GH_CLIENT_ID:string;GH_CLIENT_SECRET:string;GH_PRIVATE_KEY:string;GH_WEBHOOK_SECRET:string}
+export interface Env {LOCAL_GITHUB?:string;LOCAL_INSTANCE?:string;DB:D1Database;PRIVATE:R2Bucket;ASSETS:Fetcher;WORKTREES:DurableObjectNamespace<Workspace>;PROXIES:DurableObjectNamespace<ProviderProxy>;ORIGIN:string;KEY:string;GH_APP_ID:string;GH_SLUG:string;GH_CLIENT_ID:string;GH_CLIENT_SECRET:string;GH_PRIVATE_KEY:string;GH_WEBHOOK_SECRET:string}
 export type User={id:number;login:string;credential:string;expires:number};
 export function fail(status:400|401|403|404|409|413|429|502|503,message:string):never {throw new HTTPException(status,{message})}
 export function base64url(data:ArrayBuffer|Uint8Array){return btoa(String.fromCharCode(...new Uint8Array(data as ArrayBuffer))).replaceAll('+','-').replaceAll('/','_').replaceAll('=','')}

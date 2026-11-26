@@ -18,7 +18,9 @@
     "e2e": "playwright test",
     "Localhost": "node scripts/localhost.mjs",
     "schema": "node scripts/schema.mjs",
-    "github:register": "node scripts/register-github.mjs"
+    "github:register": "node scripts/register-github.mjs",
+    "infra:github": "node scripts/github-infra.mjs",
+    "benchmark": "node scripts/cloud-benchmark.mjs"
   },
   "dependencies": {
     "@cloudflare/sandbox": "1.0.3",
