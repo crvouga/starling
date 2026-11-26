@@ -1,10 +1,10 @@
 CREATE TABLE users (id INTEGER PRIMARY KEY, login TEXT NOT NULL, credential TEXT NOT NULL, expires INTEGER NOT NULL);
-CREATE TABLE oauth_states (state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires INTEGER NOT NULL);
+CREATE TABLE oauth_states (state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires INTEGER NOT NULL, destination TEXT);
 CREATE TABLE logins (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
 CREATE INDEX login_expiry ON logins(expires);
 CREATE TABLE accounts (user_id INTEGER NOT NULL REFERENCES users(id), provider TEXT NOT NULL CHECK(provider IN ('claude','codex')), credential TEXT NOT NULL, PRIMARY KEY(user_id,provider));
 CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL, installation INTEGER NOT NULL, base TEXT NOT NULL);
-CREATE TABLE worktrees (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), project_id INTEGER NOT NULL REFERENCES projects(id), branch TEXT NOT NULL UNIQUE, base TEXT NOT NULL, title TEXT NOT NULL, pr INTEGER, state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','closed')), revision INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
+CREATE TABLE worktrees (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), project_id INTEGER NOT NULL REFERENCES projects(id), branch TEXT NOT NULL UNIQUE, base TEXT NOT NULL, title TEXT NOT NULL, pr INTEGER, state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','closed')), revision INTEGER NOT NULL DEFAULT 0, reconciled INTEGER NOT NULL DEFAULT 0, next_sync INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
 CREATE INDEX worktree_owner ON worktrees(user_id,state);
 CREATE INDEX worktree_pr ON worktrees(project_id,pr);
 CREATE TABLE sessions (id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL REFERENCES worktrees(id), provider TEXT NOT NULL CHECK(provider IN ('claude','codex')), native_id TEXT, created INTEGER NOT NULL);

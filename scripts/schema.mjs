@@ -21,7 +21,7 @@ try{
  }
  const remote=process.argv.includes('--remote'),args=['d1','execute','starling',remote?'--remote':'--local','--json'];
  if(process.env.STARLING_WRANGLER_CONFIG)args.push('--config',process.env.STARLING_WRANGLER_CONFIG);
- if(!remote)args.push('--persist-to',resolve('.wrangler/localhost/state'));
+ if(!remote)args.push('--persist-to',resolve(process.env.STARLING_LOCAL_DIR??'.wrangler/localhost','state'));
  const wrangler=resolve('node_modules/.bin/wrangler');
  function current(){
   const raw=execFileSync(wrangler,[...args,'--command',"SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' AND name NOT IN ('d1_migrations','_cf_METADATA') ORDER BY rowid"],{encoding:'utf8'});

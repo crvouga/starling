@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-11-26T09:23:55.010Z",
+  "phase": "done",
+  "instance": "standard-1",
+  "totalMs": 60485,
+  "timings": {
+    "startup": 900,
+    "clone": 631,
+    "revision": 4,
+    "install": 42954,
+    "test": 3297,
+    "build": 4488,
+    "mockingbird": 786,
+    "resources": 378,
+    "write": 7,
+    "backup": 496,
+    "coldRestore": 199
+  },
+  "details": {
+    "versions": "v24.11.1\ngit version 2.39.5\ncodex-cli 0.172.0\n2.1.332 (Claude Code)",
+    "commit": "3c87997a3826ebcfa383163a5b68361f985c5d3c",
+    "tests": "> starling@0.1.0 test\n> vitest run\n\n\n\u001b[1m\u001b[30m\u001b[46m RUN \u001b[49m\u001b[39m\u001b[22m \u001b[36mv5.1.2 \u001b[39m\u001b[90m/workspace/repo\u001b[39m\n\n \u001b[32m✓\u001b[39m tests/security.test.ts \u001b[2m(\u001b[22m\u001b[2m5 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 27\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m tests/github.test.ts \u001b[2m(\u001b[22m\u001b[2m2 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[33m 304\u001b[2mms\u001b[22m\u001b[39m\n   \u001b[33m\u001b[2m✓\u001b[22m\u001b[39m recovers a previously created branch and draft PR using the Mockingbird commit graph\u001b[33m 301\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m tests/schema.test.ts \u001b[2m(\u001b[22m\u001b[2m1 test\u001b[22m\u001b[2m)\u001b[22m\u001b[32m 6\u001b[2mms\u001b[22m\u001b[39m\n\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[32m3 passed\u001b[39m\u001b[22m\u001b[90m (3)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[32m8 passed\u001b[39m\u001b[22m\u001b[90m (8)\u001b[39m\n\u001b[2m   Start at \u001b[22m 09:23:42\n\u001b[2m   Duration \u001b[22m 2.39s\u001b[2m (import 53%, tests 24%, transform 23%, worker 1%)\u001b[22m\n\n\u001b[2m    Isolate \u001b[22m \u001b[33m3 workers spawned\u001b[39m\u001b[2m · ~293ms startup each (spawn + environment, per file)\u001b[22m\n\u001b[2m            \u001b[22m \u001b[2mat least ~587ms faster with \u001b[22m\u001b[33misolate: false\u001b[39m\u001b[2m — reuses workers across files instead of one per file\u001b[22m",
+    "mockingbird": "{\"rss\":107868160,\"delta\":17563648,\"resources\":[\"namespaces\",\"records\",\"journalEntries\",\"snapshots\",\"webhooksPending\",\"heapUsedBytes\",\"namespacesExpired\",\"idleExpiryFailures\",\"recordLimitRefusals\",\"snapshotLimitRefusals\"]}",
+    "resources": "594157161\t/workspace/repo\n1898311680\nusage_usec 26968784\nuser_usec 14854147\nsystem_usec 12114636\nnice_usec 0\nnr_periods 0\nnr_throttled 0\nthrottled_usec 0\nnr_bursts 0\nburst_usec 0\nFilesystem      1B-blocks       Used  Available Use% Mounted on\n/dev/vdb       8000000000 1148440576 6710276096  15% /",
+    "recovered": "preserved\n"
+  },
+  "backupBytes": 208
+}

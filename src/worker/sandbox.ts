@@ -2,6 +2,7 @@ import {DurableObject} from 'cloudflare:workers';
 import {DirectoryBackup,Files,SandboxFileError,type DirectoryBackupRecord} from '@cloudflare/sandbox';
 import {authorized,branchAndPull,client,gh,split,tokenFor} from './github';
 import {now,type Env,type User} from './core';
+import {answerPermission,controlRequest} from './permissions';
 import {decodeNative,nativeCommand,scrub} from './native';
 import {scriptName,type Project,type Tree,type Turn,type Session,type Activity} from '../shared';
 import type {Outbound} from './outbound';
@@ -17,21 +18,26 @@ export class Workspace extends DurableObject<Env>{
   const body=new ReadableStream<Uint8Array>({start:ctrl=>{controller=ctrl;this.listeners.add(ctrl);ctrl.enqueue(new TextEncoder().encode('retry: 2000\ndata: state\n\n'));timer=setTimeout(()=>{this.listeners.delete(ctrl);ctrl.close()},55000)},cancel:()=>{clearTimeout(timer);this.listeners.delete(controller)}});
   return new Response(body,{headers:{'content-type':'text/event-stream','cache-control':'no-store'}})
  }
+ private pendingPermission?:{turn:string;id:string;name:string;input:Record<string,unknown>;writer:WritableStreamDefaultWriter<Uint8Array>};
+ permission(){const p=this.pendingPermission;return p?{turn:p.turn,id:p.id,name:p.name,input:scrub(JSON.stringify(p.input)).slice(0,4000)}:null}
+ async approve(turn:string,id:string,allow:boolean){const p=this.pendingPermission;if(!p||p.turn!==turn||p.id!==id)return false;this.pendingPermission=undefined;await p.writer.write(new TextEncoder().encode(JSON.stringify(answerPermission(id,p.input,allow))+'\n'));this.notify('activity');return true}
+ private delta(session:string,delta:string){const data=new TextEncoder().encode('event: delta\ndata: '+JSON.stringify({session,delta})+'\n\n');for(const sub of this.listeners){try{sub.enqueue(data)}catch{this.listeners.delete(sub)}}}
  private running=false;
  private signal?:AbortController;
+ private currentTurn?:string;
  private c(){if(!this.ctx.container)throw new Error('Missing container binding');return this.ctx.container}
  async wake(tree:string){await this.ctx.storage.put('tree',tree);if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+1)}
- async cancel(){this.signal?.abort();if(this.c().running){await (await this.c().exec(['pkill','-KILL','-u','node'])).output()}}
+ async cancel(id:string){if(this.currentTurn!==id)return;this.signal?.abort();if(this.c().running){await (await this.c().exec(['pkill','-KILL','-u','node'])).output()}}
  private backup(tree:string){return new DirectoryBackup(this.c(),this.ctx.exports.DirectoryBackupGateway as Gateway,{binding:'PRIVATE',prefix:'backups/'+tree+'/'})}
  async alarm(){
   if(this.running)return;this.running=true;
-  try{await this.execute()}finally{this.running=false;this.notify('state')}
+  try{await this.execute()}finally{this.currentTurn=undefined;this.running=false;this.notify('state')}
  }
  private async execute(){
   const env=this.env,treeId=await this.ctx.storage.get<string>('tree');
   if(!treeId)return;
   const turn=await env.DB.prepare("SELECT * FROM turns WHERE worktree_id=? AND status IN ('queued','running','saving')").bind(treeId).first<Turn>();
-  if(!turn)return;
+  if(!turn)return;this.currentTurn=turn.id;
   const t=(await env.DB.prepare('SELECT * FROM worktrees WHERE id=?').bind(treeId).first<Tree>())!;
   const s=(await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(turn.session_id).first<Session>())!;
   const p=(await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(t.project_id).first<Project>())!;
@@ -57,13 +63,15 @@ export class Workspace extends DurableObject<Env>{
    for(const host of ['github.com','registry.npmjs.org','model.starling.internal'])await c.interceptOutboundHttps(host,gate);
    await c.setInactivityTimeout(25*60000);
    this.signal=new AbortController();
+   if(await env.DB.prepare('SELECT cancel FROM turns WHERE id=?').bind(turn.id).first<number>('cancel'))this.signal.abort();
    const signal=AbortSignal.any([AbortSignal.timeout(15*60000),this.signal.signal]);
-   const command=async(argv:string[],cwd=repoDir,handle?:(line:string)=>Promise<void>)=>{
-    const started=Date.now(),proc=await c.exec(argv,{cwd,user:'1000:1000',env:runtimeEnv,stderr:'combined',signal});
+   const command=async(argv:string[],cwd=repoDir,handle?:(line:string)=>Promise<void>,claudeMessage?:string)=>{
+    const started=Date.now(),proc=await c.exec(argv,{cwd,user:'1000:1000',env:runtimeEnv,stderr:'combined',signal,...(claudeMessage?{stdin:'pipe' as const}:{})});
+    const stdin=proc.stdin?.getWriter();if(claudeMessage&&stdin)await stdin.write(new TextEncoder().encode(JSON.stringify({type:'user',message:{role:'user',content:claudeMessage}})+'\n'));
     const reader=proc.stdout!.pipeThrough(new TextDecoderStream()).getReader();let buffer='',tail='',size=0;
     while(true){const {done,value}=await reader.read();if(done)break;size+=value.length;
      if(size>8_000_000){proc.kill();throw new Error('Command output limit exceeded.')}
-     tail=(tail+value).slice(-16000);if(handle){buffer+=value;const lines=buffer.split('\n');buffer=lines.pop()!;for(const l of lines)if(l)await handle(l)}
+     tail=(tail+value).slice(-16000);if(handle){buffer+=value;const lines=buffer.split('\n');buffer=lines.pop()!;for(const l of lines)if(l){if(claudeMessage&&stdin){let raw;try{raw=JSON.parse(l)}catch{}if(raw?.type==='result')await stdin.close();const v=controlRequest.safeParse(raw);if(v.success){this.pendingPermission={turn:turn.id,id:v.data.request_id,name:v.data.request.tool_name,input:v.data.request.input,writer:stdin};this.notify('activity');continue}if(raw?.type==='stream_event'){if(raw.event?.type==='content_block_delta'&&typeof raw.event.delta?.text==='string')this.delta(s.id,raw.event.delta.text);continue}}await handle(l)}}
     }
     if(handle&&buffer)await handle(buffer);
     const code=await proc.exitCode;console.log(JSON.stringify({event:'command',worktree:t.id,program:argv[0],ms:Date.now()-started,exit:code}));
@@ -87,11 +95,15 @@ export class Workspace extends DurableObject<Env>{
      const update=decodeNative(line);if(update.native && update.native!==s.native_id){s.native_id=update.native;await env.DB.prepare('UPDATE sessions SET native_id=? WHERE id=?').bind(s.native_id,s.id).run()}
      for(const u of update.updates){await event(u.kind,u.body);if(u.kind==='assistant')report=u.body}
      if(update.failed)failed=true
-    });
+    },s.provider==='claude'?turn.input+(image?'\nRead the attached image at '+image:''):undefined);
     if(failed)throw new Error('Agent reported a failed turn.');
     const outcomes:string[]=[];let checkFailure=false;
     for(const name of ['check','test']){try{const output=await command(['node','/usr/local/lib/starling-script.mjs',name,'--if-present']);outcomes.push(name+': '+(output.startsWith('No '+name+' script')?'unavailable':'passed'));await event('tool',name+'\n'+output)}catch(e){checkFailure=true;outcomes.push(name+': failed');await event('tool',name+'\n'+String(e))}}
-    await command(['git','add','--all','--','.']);
+    try{
+     const preview=await command(['timeout','55','node','/usr/local/lib/starling-preview.mjs','--if-present']);
+     if(!preview.startsWith('No preview'))await event('tool',preview)
+    }catch(e){outcomes.push('preview: failed');await event('tool',String(e))}
+    await command(['git','add','--all','--','.',':(exclude).starling/evidence',':(exclude).starling/preview-state.json']);
     if(await command(['git','status','--porcelain']))await command(['git','commit','-m',t.title]);
     await command(['git','push','origin','HEAD:refs/heads/'+t.branch]);
     const evidence=await publishEvidence(files,env,t,turn);
@@ -101,10 +113,14 @@ export class Workspace extends DurableObject<Env>{
     if(checkFailure)throw new Error('Repository checks failed. Results were posted to the pull request.')
    }else{
     const name=scriptName.parse(turn.kind);await event('status','Running '+name);
-    const output=await command(['timeout',name==='preview'?'60':'600','node','/usr/local/lib/starling-script.mjs',name]);await event('tool',output||name+' completed')
+    const output=await command(name==='preview'?['timeout','55','node','/usr/local/lib/starling-preview.mjs']:['timeout','600','node','/usr/local/lib/starling-script.mjs',name]);await event('tool',output||name+' completed');
+    if(name==='preview'){
+     const evidence=await publishEvidence(files,env,t,turn);
+     if(evidence.length){await api.rest.issues.createComment({...repo,issue_number:t.pr,body:'### Application preview\n'+evidence.join('\n')+'\n\n<!-- starling:'+turn.id+' -->'});this.notify('pr')}
+    }
    }
   }catch(e){failure=scrub(e instanceof Error?e.message:'Execution failed').slice(-1600);await event('status',failure)}
-  finally{this.signal=undefined}
+  finally{this.signal=undefined;this.pendingPermission=undefined}
   if(c.running){await (await c.exec(['pkill','-KILL','-u','node'])).output();if(checkpoint || turn.status==='running'){
     await this.ctx.storage.put('outcome',failure??'');await env.DB.prepare("UPDATE turns SET status='saving' WHERE id=?").bind(turn.id).run();await this.finishSave(t,turn,backup);return
    }await c.destroy()}
@@ -126,14 +142,16 @@ export class Workspace extends DurableObject<Env>{
 }
 async function publishEvidence(files:Files,env:Env,t:Tree,turn:Turn){
  const dir=repoDir+'/.starling/evidence',links:string[]=[];
- if(!(await exists(files,dir)))return links;
+ if(!(await exists(files,dir))||(await files.lstat(repoDir+'/.starling')).type!=='directory'||(await files.lstat(dir)).type!=='directory')return links;
  const list=await files.readDirectory(dir);
  for(const file of list.slice(0,6)){
   const name=file.name;if(!/^[\w.-]{1,100}\.(png|jpe?g|webm)$/i.test(name))continue;
   const entry=await files.lstat(dir+'/'+name);if(entry.type!=='file'||entry.size>12*1024*1024)continue;
   const key=t.id+'/'+turn.id+'/'+name,content=await files.readFile(dir+'/'+name);
   const type=name.endsWith('.webm')?'video/webm':name.endsWith('.png')?'image/png':'image/jpeg';
-  await env.PRIVATE.put('evidence/'+key,content.body,{httpMetadata:{contentType:type}});links.push('['+name+']('+env.ORIGIN+'/api/evidence/'+key+')')
+  if(!content.body||!entry.size)continue;
+  const stream=new FixedLengthStream(entry.size);
+  await Promise.all([env.PRIVATE.put('evidence/'+key,stream.readable,{httpMetadata:{contentType:type}}),content.body.pipeTo(stream.writable)]);links.push('['+name+']('+env.ORIGIN+'/api/evidence/'+key+')')
  }
  return links
 }

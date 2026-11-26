@@ -38,7 +38,7 @@ export async function authorized(api:Octokit,p:Project,write=false){
 }
 export async function tokenFor(env:Env,p:Project,write=false){
   const auth=createAppAuth({request:new Octokit({baseUrl:localGithub(env)}).request,appId:env.GH_APP_ID,privateKey:createPrivateKey(env.GH_PRIVATE_KEY.replaceAll('\\n','\n')).export({format:'pem',type:'pkcs8'}).toString(),clientId:env.GH_CLIENT_ID,clientSecret:env.GH_CLIENT_SECRET});
-  const a=await auth({type:'installation',installationId:p.installation,repositoryIds:[p.id],permissions:{contents:write?'write':'read',pull_requests:write?'write':'read',issues:write?'write':'read'}});return a.token
+  const a=await auth({type:'installation',installationId:p.installation,repositoryIds:[p.id],permissions:{contents:write?'write':'read',pull_requests:write?'write':'read',issues:write?'write':'read',checks:'read',statuses:'read'}});return a.token
 }
 export async function branchAndPull(api:Octokit,p:Project,t:Tree){
   const repo=split(p.name);

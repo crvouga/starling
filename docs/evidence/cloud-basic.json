@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-11-26T09:18:32.729Z",
+  "phase": "failed",
+  "totalMs": 183170,
+  "timings": {
+    "startup": 1361,
+    "clone": 749,
+    "revision": 10,
+    "install": 180126
+  },
+  "details": {
+    "versions": "v24.11.1\ngit version 2.39.5\ncodex-cli 0.172.0\n2.1.332 (Claude Code)",
+    "commit": "3c87997a3826ebcfa383163a5b68361f985c5d3c"
+  },
+  "error": "install failed: npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead\n"
+}
